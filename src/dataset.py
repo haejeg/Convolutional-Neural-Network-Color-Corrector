@@ -1,17 +1,8 @@
-"""
-dataset.py — Data loading and preprocessing for the MIT-Adobe FiveK dataset.
-
-This module handles:
-- Finding paired (raw input, expert-retouched) image files
-- Splitting them into training and validation sets
-- Applying the correct image transforms (crop, flip, normalize)
-- Serving batches to the training loop via PyTorch's DataLoader
-
-The most important thing to get right here is PAIRED transforms: when we
-randomly crop or flip the input image, we must apply the exact same crop/flip
-to the ground-truth target. If we don't, the network will try to learn a
-mapping between misaligned image pairs, which is impossible.
-"""
+# Data loading and preprocessing for the dataset
+# - Pairs images (Original, ExpertC)
+# - Split into train, val, test sets
+# - Apply transforms (crop, flip, normalize)
+# - Serve batches to the training loop via PyTorch's DataLoader
 
 import random
 from pathlib import Path
@@ -22,24 +13,23 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 
-def make_splits(input_dir: str, gt_dir: str, val_fraction: float = 0.1, seed: int = 42):
-    """
-    Find all paired image files and split them into train/val sets.
+def make_splits(input_dir: str, gt_dir: str, val_fraction: float = 0.2, test_fraction: float = 0.2, seed: int = 42):
+    # Split all paired image files into train/val/test sets
+    # Args:
+    #   input_dir: Path to folder of raw input images
+    #   gt_dir: Path to folder of expert-retouched ground truth images
+    #   val_fraction: Fraction of images to hold out for validation (Default 0.2)
+    #   test_fraction: Fraction of images to hold out for testing (Default 0.2)
+    #   seed: Random seed for reproducible splits
+    # Returns:
+    #   train_pairs: List of (input_path, gt_path) tuples for training.
+    #   val_pairs: List of (input_path, gt_path) tuples for validation.
+    #   test_pairs: List of (input_path, gt_path) tuples for testing.
 
-    Args:
-        input_dir:     Path to folder of raw input images.
-        gt_dir:        Path to folder of expert-retouched ground truth images.
-        val_fraction:  Fraction of images to hold out for validation (default 10%).
-        seed:          Random seed for reproducible splits.
-
-    Returns:
-        train_pairs: List of (input_path, gt_path) tuples for training.
-        val_pairs:   List of (input_path, gt_path) tuples for validation.
-    """
     input_dir = Path(input_dir)
     gt_dir = Path(gt_dir)
 
-    # Collect filenames that exist in BOTH directories (inner join on filename stem)
+    # checking if files are both in expertc AND original!
     input_stems = {p.stem: p for p in input_dir.iterdir() if p.is_file()}
     gt_stems = {p.stem: p for p in gt_dir.iterdir() if p.is_file()}
 
@@ -53,37 +43,35 @@ def make_splits(input_dir: str, gt_dir: str, val_fraction: float = 0.1, seed: in
 
     pairs = [(str(input_stems[s]), str(gt_stems[s])) for s in common_stems]
 
-    # Shuffle deterministically so the split is always the same
+    # shuffle
     rng = random.Random(seed)
     rng.shuffle(pairs)
 
     n_val = max(1, int(len(pairs) * val_fraction))
+    n_test = int(len(pairs) * test_fraction)
     val_pairs = pairs[:n_val]
-    train_pairs = pairs[n_val:]
+    test_pairs = pairs[n_val:n_val+n_test]
+    train_pairs = pairs[n_val+n_test:]
 
-    print(f"Dataset split: {len(train_pairs)} training, {len(val_pairs)} validation pairs")
-    return train_pairs, val_pairs
+    print(f"Dataset split: {len(train_pairs)} training, {len(val_pairs)} validation, {len(test_pairs)} test pairs")
+    return train_pairs, val_pairs, test_pairs
 
 
 class FiveKDataset(Dataset):
-    """
-    PyTorch Dataset for paired (input, ground-truth) image retouching.
-
-    Each item returned is a dict:
-        {
-            'input':    FloatTensor of shape (3, H, W), normalized to [-1, 1]
-            'target':   FloatTensor of shape (3, H, W), normalized to [-1, 1]
-            'filename': str, the stem of the image filename (useful for saving results)
-        }
-    """
+    # Dataset for paired images
+    # Each item returned is a dict:
+    #   {
+    #       'input':    Tensor of shape (3, H, W), normalized to [-1, 1]
+    #       'target':   Tensor of shape (3, H, W), normalized to [-1, 1]
+    #       'filename': str, the stem of the image filename (useful for saving results)
+    #   }
 
     def __init__(self, pairs: list, split: str = "train", crop_size: int = 384):
-        """
-        Args:
-            pairs:      List of (input_path, gt_path) tuples from make_splits().
-            split:      'train' or 'val' — controls which augmentations are applied.
-            crop_size:  Size of the square crop. Must be divisible by 16.
-        """
+        # Args:
+        #   pairs:      List of (input_path, gt_path) tuples from make_splits().
+        #   split:      'train' or 'val' — controls which augmentations are applied.
+        #   crop_size:  Size of the square crop. Must be divisible by 16.
+
         assert crop_size % 16 == 0, "crop_size must be divisible by 16 (network downsamples 4x)"
         self.pairs = pairs
         self.split = split
@@ -119,14 +107,7 @@ class FiveKDataset(Dataset):
         }
 
     def _apply_paired_transforms(self, input_img: Image.Image, target_img: Image.Image):
-        """
-        Apply identical spatial transforms to both images.
-
-        The key trick: we set the same random seed before transforming each image,
-        so that random operations (crop location, flip decision) are identical.
-        Without this, the input and target would be different spatial regions,
-        and training would fail silently.
-        """
+        # Apply identical transformations to paired images
         to_tensor = transforms.ToTensor()  # converts PIL [0,255] → float [0,1]
 
         if self.split == "train":
@@ -146,6 +127,13 @@ class FiveKDataset(Dataset):
             input_img = flip(input_img)
             torch.manual_seed(seed)
             target_img = flip(target_img)
+
+            # Apply ColorJitter to the input image ONLY.
+            # This makes the input randomly dimmer, less contrasted, and desaturated,
+            # which forces the model to learn how to recover vibrant colors and 
+            # appropriate brightness rather than relying on identity mapping.
+            color_jitter = transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05)
+            input_img = color_jitter(input_img)
         else:
             # For validation, always use the center crop for reproducibility
             crop = transforms.CenterCrop(self.crop_size)
@@ -171,7 +159,7 @@ if __name__ == "__main__":
         print(f"ERROR: Dataset directories not found.\nExpected:\n  {input_dir}\n  {gt_dir}")
         sys.exit(1)
 
-    train_pairs, val_pairs = make_splits(str(input_dir), str(gt_dir))
+    train_pairs, val_pairs, test_pairs = make_splits(str(input_dir), str(gt_dir))
 
     train_ds = FiveKDataset(train_pairs, split="train", crop_size=384)
     val_ds = FiveKDataset(val_pairs, split="val", crop_size=384)

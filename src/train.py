@@ -196,19 +196,22 @@ def main():
         print("Expected subdirectories: Original/ and ExpertC/")
         sys.exit(1)
 
-    train_pairs, val_pairs = make_splits(str(input_dir), str(gt_dir))
+    train_pairs, val_pairs, test_pairs = make_splits(str(input_dir), str(gt_dir))
 
     if args.limit is not None:
-        all_pairs = val_pairs + train_pairs
+        all_pairs = test_pairs + val_pairs + train_pairs
         if len(all_pairs) > args.limit:
             all_pairs = all_pairs[:args.limit]
             n_val = max(1, int(len(all_pairs) * 0.1))
+            n_test = int(len(all_pairs) * 0.1)
             val_pairs = all_pairs[:n_val]
-            train_pairs = all_pairs[n_val:]
-            print(f"Limiting dataset to: {len(train_pairs)} training, {len(val_pairs)} validation pairs")
+            test_pairs = all_pairs[n_val:n_val+n_test]
+            train_pairs = all_pairs[n_val+n_test:]
+            print(f"Limiting dataset to: {len(train_pairs)} training, {len(val_pairs)} validation, {len(test_pairs)} test pairs")
 
     train_ds = FiveKDataset(train_pairs, split="train", crop_size=args.crop_size)
     val_ds = FiveKDataset(val_pairs, split="val", crop_size=args.crop_size)
+    test_ds = FiveKDataset(test_pairs, split="val", crop_size=args.crop_size)
 
     train_loader = DataLoader(
         train_ds,
@@ -220,6 +223,14 @@ def main():
     )
     val_loader = DataLoader(
         val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(args.num_workers > 0),
+    )
+    test_loader = DataLoader(
+        test_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
@@ -324,6 +335,42 @@ def main():
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
     print(f"Best model saved to: {checkpoints_dir / 'best.pth'}")
+
+    # ------------------------------------------------------------------
+    # Final Test Set Evaluation
+    # ------------------------------------------------------------------
+    print("\n--- Running Final Evaluation on Test Set ---")
+    best_checkpoint_path = checkpoints_dir / "best.pth"
+    if best_checkpoint_path.exists():
+        checkpoint = torch.load(best_checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print("Loaded best model weights for test evaluation.")
+
+    # 1. Compute Test Metrics
+    test_metrics = validate(model, test_loader, perceptual_fn, device)
+    print(
+        f"Test Loss: {test_metrics['loss']:.4f} | "
+        f"Test PSNR: {test_metrics['psnr']:.2f} dB | "
+        f"Test SSIM: {test_metrics['ssim']:.4f}"
+    )
+
+    # 2. Save Test Samples
+    test_samples_dir = results_dir / "test_samples"
+    test_samples_dir.mkdir(exist_ok=True)
+    print(f"\nSaving test predictions to {test_samples_dir} ...")
+
+    model.eval()
+    with torch.no_grad():
+        for i, batch in enumerate(tqdm(test_loader, desc="Saving Test Samples", leave=False)):
+            inputs = batch["input"].to(device)
+            targets = batch["target"].to(device)
+            preds = model(inputs)
+
+            save_path = str(test_samples_dir / f"test_batch_{i+1:03d}.jpg")
+            save_comparison_grid(inputs.cpu(), preds.cpu(), targets.cpu(), save_path)
+            
+    print("Test evaluation complete! All test images saved.")
+
 
 
 if __name__ == "__main__":
