@@ -67,7 +67,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> UNet:
     model = UNet(in_channels=3, out_channels=3, base_channels=64)
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
-
+    
     # eval() switches BatchNorm and Dropout to inference mode.
     # Forgetting this causes BatchNorm to use batch statistics instead of
     # the running statistics computed during training, giving wrong results.
