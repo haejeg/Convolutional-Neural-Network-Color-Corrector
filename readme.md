@@ -1,5 +1,7 @@
 ## Convolutional-Neural-Network-Color-Corrector
 
+**Final report (PDF)**: [`Project Report.pdf`](./Project%20Report.pdf)
+
 This project trains a depth-4 U-Net retouching model on paired images (original → expert edited) and runs inference on new photos.
 
 The model predicts **global color/exposure adjustments** (and a **1‑channel local exposure map**) that are applied back onto the input image, which helps reduce color bleeding and keeps outputs stable.
